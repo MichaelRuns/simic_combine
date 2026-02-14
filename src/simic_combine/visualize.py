@@ -411,5 +411,144 @@ def generate_all_figures(
         plt.show()
 
 
+def create_interactive_plot(
+    output_path: Optional[Path] = None,
+    auto_open: bool = False,
+) -> "plotly.graph_objects.Figure":
+    """
+    Create an interactive Plotly scatter plot with hover information.
+
+    Features:
+    - All treatment observations color-coded by control status
+    - Fitted allometric curve from controlled cases
+    - Hover info: Animal ID, weight, age, dose, control status
+    - Interactive legend to toggle groups
+
+    Args:
+        output_path: Path to save HTML file. If None, returns figure only.
+        auto_open: Whether to open the HTML file in browser.
+
+    Returns:
+        Plotly Figure object.
+    """
+    import plotly.graph_objects as go
+
+    # Load data
+    df = load_data()
+    treatment = get_treatment_data(df)
+    controlled = get_controlled_cases(treatment)
+
+    # Fit model
+    model = fit_allometric_model(controlled["Weight"], controlled["daily_dose_mcg"])
+
+    # Get animal ID column
+    id_col = df.columns[0] if "Animal ID" not in df.columns else "Animal ID"
+
+    # Create figure
+    fig = go.Figure()
+
+    # Add scatter traces for each control status
+    control_order = [1, 2, 3, 4, 5]  # Order for legend
+    plotly_colors = {
+        1: "#2ecc71",  # Green - Controlled
+        2: "#3498db",  # Blue - Undertreated
+        3: "#e74c3c",  # Red - Overtreated
+        4: "#9b59b6",  # Purple - Elevated TT4 and TSH
+        5: "#f39c12",  # Orange - Normal TT4, elevated TSH
+    }
+
+    for control in control_order:
+        subset = treatment[treatment["Control"] == control].copy()
+        if len(subset) == 0:
+            continue
+
+        # Build hover text
+        hover_text = []
+        for _, row in subset.iterrows():
+            animal_id = row.get(id_col, "Unknown")
+            weight = row["Weight"]
+            age = row.get("Age", None)
+            daily_dose = row["daily_dose_mcg"]
+            dose_per_kg = row["dose_per_kg"]
+
+            text = f"<b>{animal_id}</b><br>"
+            text += f"Weight: {weight:.2f} kg<br>"
+            if pd.notna(age):
+                text += f"Age: {int(age)} days<br>"
+            text += f"Daily Dose: {daily_dose:.0f} mcg<br>"
+            text += f"Dose/kg: {dose_per_kg:.0f} mcg/kg<br>"
+            text += f"Status: {CONTROL_LABELS.get(control, str(control))}"
+            hover_text.append(text)
+
+        fig.add_trace(go.Scatter(
+            x=subset["Weight"],
+            y=subset["dose_per_kg"],
+            mode="markers",
+            name=CONTROL_LABELS.get(control, f"Status {control}"),
+            marker=dict(
+                size=10,
+                color=plotly_colors.get(control, "#888888"),
+                opacity=0.7,
+                line=dict(width=1, color="white"),
+            ),
+            hovertemplate="%{customdata}<extra></extra>",
+            customdata=hover_text,
+        ))
+
+    # Add fitted curve (from controlled cases only)
+    w_range = np.linspace(treatment["Weight"].min() * 0.9, treatment["Weight"].max() * 1.1, 100)
+    dose_per_kg_pred = model.predict_per_kg(w_range)
+
+    fig.add_trace(go.Scatter(
+        x=w_range,
+        y=dose_per_kg_pred,
+        mode="lines",
+        name=f"Fitted: {model.a:.0f} × W^{model.b - 1:.2f}",
+        line=dict(color="black", width=2),
+        hovertemplate="Weight: %{x:.2f} kg<br>Predicted: %{y:.0f} mcg/kg<extra></extra>",
+    ))
+
+    # Update layout
+    fig.update_layout(
+        title=dict(
+            text=f"<b>Hypothyroid Kitten Dosing: Dose per kg vs Weight</b><br>"
+                 f"<sub>Formula: Dose (mcg/kg) = {model.a:.0f} × Weight^{model.b - 1:.2f} | "
+                 f"R² = {model.r_squared:.3f} | n = {model.n_observations} controlled cases</sub>",
+            x=0.5,
+            xanchor="center",
+        ),
+        xaxis=dict(
+            title="Weight (kg)",
+            gridcolor="lightgray",
+        ),
+        yaxis=dict(
+            title="Dose per kg (mcg/kg/day)",
+            gridcolor="lightgray",
+        ),
+        legend=dict(
+            title="Control Status",
+            yanchor="top",
+            y=0.99,
+            xanchor="right",
+            x=0.99,
+        ),
+        hovermode="closest",
+        template="plotly_white",
+        height=600,
+        width=900,
+    )
+
+    # Save to HTML if path provided
+    if output_path:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(str(output_path), auto_open=auto_open)
+        print(f"Interactive plot saved to: {output_path}")
+
+    return fig
+
+
 if __name__ == "__main__":
     generate_all_figures(output_dir=Path("figures"), show=True)
+    # Also generate interactive plot
+    create_interactive_plot(output_path=Path("figures") / "interactive_dose_vs_weight.html")

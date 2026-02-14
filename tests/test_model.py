@@ -162,7 +162,7 @@ class TestDoseTable:
         assert "Weight (kg)" in table.columns
         assert "Daily Dose (mcg)" in table.columns
         assert "Dose per kg (mcg/kg)" in table.columns
-        assert len(table) == 8  # Default weights
+        assert len(table) == 7  # Default weights (1.0 to 6.0 kg)
 
 
 if __name__ == "__main__":

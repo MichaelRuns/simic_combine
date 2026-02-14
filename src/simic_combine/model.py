@@ -87,21 +87,24 @@ class AllometricModel:
         Generate a dose reference table for common weights.
 
         Args:
-            weights: List of weights to include. Defaults to [0.5, 1, 1.5, 2, 3, 4, 5, 6].
+            weights: List of weights to include. Defaults to [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0].
+                     Note: Starts at 1.0 kg as minimum controlled case in data is 1.25 kg.
 
         Returns:
             DataFrame with weight, predicted dose, and dose per kg.
         """
         if weights is None:
-            weights = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0]
+            # Start at 1.0 kg - minimum controlled case is 1.25 kg
+            # Values below 1.0 kg would be extrapolation outside observed data
+            weights = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0]
 
         doses = self.predict(np.array(weights))
         dose_per_kg = self.predict_per_kg(np.array(weights))
 
         return pd.DataFrame({
             "Weight (kg)": weights,
-            "Daily Dose (mcg)": np.round(doses, 1),
-            "Dose per kg (mcg/kg)": np.round(dose_per_kg, 1),
+            "Daily Dose (mcg)": np.round(doses, 0).astype(int),
+            "Dose per kg (mcg/kg)": np.round(dose_per_kg, 0).astype(int),
         })
 
 
