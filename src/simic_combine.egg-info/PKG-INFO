@@ -11,10 +11,186 @@ Requires-Dist: numpy>=1.24.0
 Requires-Dist: scipy>=1.10.0
 Requires-Dist: matplotlib>=3.7.0
 Requires-Dist: seaborn>=0.12.0
+Requires-Dist: plotly>=5.0.0
+Requires-Dist: statsmodels>=0.14.0
 Provides-Extra: dev
 Requires-Dist: pytest>=7.0.0; extra == "dev"
 Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
 Dynamic: license-file
 
-# simic_combine
-mapping &amp; predicting thyroid data in kittnes
+# Hypothyroid Kitten T4 Dosing Calculator
+
+A tool for predicting optimal levothyroxine (T4) dosing in hypothyroid kittens based on body weight.
+
+## Clinical Summary
+
+This calculator uses allometric scaling to predict T4 doses for congenital hypothyroid kittens. The model was developed from clinical data of kittens treated at veterinary teaching hospitals.
+
+### Key Finding
+
+**Smaller kittens require higher doses per kilogram than larger kittens.**
+
+This follows the principle of metabolic scaling - smaller animals have higher metabolic rates relative to their body size and therefore require proportionally higher medication doses.
+
+---
+
+## Dosing Formula
+
+```
+Daily T4 Dose (mcg) = 142 × Weight(kg)^0.14
+```
+
+Or equivalently, for dose per kilogram:
+
+```
+Dose per kg (mcg/kg) = 142 × Weight(kg)^-0.86
+```
+
+---
+
+## Quick Reference Dosing Table
+
+| Weight (kg) | Daily Dose (mcg) | Dose per kg (mcg/kg) | Observed Range* |
+|-------------|------------------|----------------------|-----------------|
+| 1.0         | 142              | 142                  | ~100 mcg/kg†    |
+| 1.5         | 151              | 101                  | 90-106 mcg/kg   |
+| 2.0         | 157              | 79                   | 64-88 mcg/kg    |
+| 3.0         | 166              | 55                   | 39-77 mcg/kg    |
+| 4.0         | 173              | 43                   | 27-57 mcg/kg    |
+| 5.0         | 178              | 36                   | 24-41 mcg/kg    |
+| 6.0         | 183              | 31                   | 20-50 mcg/kg    |
+
+*Observed Range: Interquartile range (25th-75th percentile) of doses that achieved control in the study population.
+
+†Limited data below 1.5 kg - only 4 controlled cases between 1.0-1.5 kg.
+
+**Note:** These are starting dose recommendations based on controlled cases. Individual patients may require dose adjustments based on clinical response and thyroid monitoring. There is substantial individual variation in dose requirements.
+
+---
+
+## Clinical Interpretation
+
+### Control Status Definitions
+
+When monitoring treatment response, patients are classified as:
+
+| Status | Definition |
+|--------|------------|
+| **1 - Controlled** | Normal TT4, Normal TSH |
+| **2 - Undertreated** | Low TT4 and/or High TSH |
+| **3 - Overtreated** | High TT4, Normal TSH |
+| **4 - Elevated TT4 & TSH** | Both TT4 and TSH elevated |
+| **5 - Normal TT4, High TSH** | TT4 normal but TSH elevated |
+
+The dosing formula was derived from observations where patients achieved **Control Status 1** (biochemically controlled).
+
+---
+
+## Understanding the Model
+
+### Why do smaller kittens need more mcg/kg?
+
+This is consistent with allometric scaling principles seen across species and drug classes:
+
+1. **Higher metabolic rate** - Smaller animals have faster metabolism relative to body size
+2. **Faster drug clearance** - Medications are metabolized more quickly in smaller patients
+3. **Surface area to volume ratio** - Smaller bodies lose heat faster and have proportionally higher energy demands
+
+### Model Validation
+
+The allometric model was validated against empirical medians from controlled cases:
+
+| Weight | Model Prediction | Actual Median | Difference |
+|--------|------------------|---------------|------------|
+| 1.5 kg | 100 mcg/kg       | 100 mcg/kg    | 0          |
+| 2.0 kg | 78 mcg/kg        | 71 mcg/kg     | +7         |
+| 3.0 kg | 55 mcg/kg        | 56 mcg/kg     | 0          |
+| 4.0 kg | 43 mcg/kg        | 37 mcg/kg     | +7         |
+| 5.0 kg | 36 mcg/kg        | 31 mcg/kg     | +5         |
+
+The model predictions align closely with observed outcomes, with a slight conservative bias (+5-7 mcg/kg) which may be clinically appropriate.
+
+### Model Limitations
+
+- **R² = 0.017** - Weight explains only 1.7% of dose variance; individual variation is high
+- **Limited data below 1.5 kg** - Only 4 controlled cases; predictions for smaller kittens are extrapolations
+- The model provides a **starting point** for dosing, not a definitive prescription
+- Clinical judgment and monitoring remain essential
+- Some patients may require doses outside the predicted range
+
+---
+
+## Figures
+
+The `figures/` directory contains publication-quality visualizations:
+
+| Figure | Description |
+|--------|-------------|
+| `fig1_dose_vs_weight` | Total daily dose vs body weight |
+| `fig2_dose_per_kg_vs_weight` | Dose per kg vs weight (key clinical insight) |
+| `fig3_dose_per_kg_vs_age` | How dose requirements change with age |
+| `fig4_individual_trajectories` | Individual patient dosing journeys |
+| `fig5_control_distribution` | Control status outcomes by dose range |
+| `summary_figure` | Combined 4-panel overview |
+
+---
+
+## Running the Calculator
+
+### Prerequisites
+
+- Python 3.10 or higher
+- Required packages: pandas, numpy, scipy, matplotlib, seaborn
+
+### Installation
+
+```bash
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install the package
+pip install -e .
+```
+
+### Usage
+
+**Print the dosing formula and reference table:**
+```bash
+python -m simic_combine.predict
+```
+
+**Generate all figures:**
+```bash
+python -m simic_combine.visualize
+```
+
+**Use in Python:**
+```python
+from simic_combine import predict_optimal_dose
+
+# Predict dose for a 2 kg kitten
+dose = predict_optimal_dose(2.0)
+print(f"Recommended daily dose: {dose:.0f} mcg")
+# Output: Recommended daily dose: 157 mcg
+
+# Get dose range (95% confidence interval)
+low, optimal, high = predict_optimal_dose(2.0, return_range=True)
+print(f"Dose range: {low:.0f} - {high:.0f} mcg")
+```
+
+---
+
+## Data Source
+
+Clinical data from hypothyroid kittens treated at UC Davis VMTH and collaborating institutions. The dataset includes longitudinal observations across multiple patients with varying treatment protocols and outcomes.
+
+---
+
+## Contact
+
+For questions about this tool or the underlying clinical study, please contact the research team.
+
+---
+
+*This tool is intended for veterinary professional use. Dosing recommendations should be used in conjunction with clinical judgment and appropriate patient monitoring.*

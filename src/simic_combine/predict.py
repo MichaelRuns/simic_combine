@@ -2,11 +2,12 @@
 
 from typing import overload
 
-from simic_combine.data import load_data, get_treatment_data, get_controlled_cases
-from simic_combine.model import fit_allometric_model, AllometricModel
+from simic_combine.data import load_data, get_treatment_data, get_controlled_cases, get_mixed_model_data
+from simic_combine.model import fit_allometric_model, AllometricModel, fit_mixed_model, MixedAllometricModel
 
-# Cached model (lazy loaded)
+# Cached models (lazy loaded)
 _cached_model: AllometricModel | None = None
+_cached_mixed_model: MixedAllometricModel | None = None
 
 
 def get_fitted_model(force_refit: bool = False) -> AllometricModel:
@@ -138,5 +139,98 @@ def get_dose_table() -> str:
     return model.dose_table().to_string(index=False)
 
 
+# --- Mixed-effects model functions ---
+
+
+def get_fitted_mixed_model(force_refit: bool = False) -> MixedAllometricModel:
+    """
+    Get the fitted mixed-effects model, loading from data if needed.
+
+    Args:
+        force_refit: If True, refit model even if cached.
+
+    Returns:
+        Fitted MixedAllometricModel instance.
+    """
+    global _cached_mixed_model
+
+    if _cached_mixed_model is None or force_refit:
+        df = load_data()
+        treatment = get_treatment_data(df)
+        mixed_data = get_mixed_model_data(treatment)
+        _cached_mixed_model = fit_mixed_model(mixed_data)
+
+    return _cached_mixed_model
+
+
+def predict_optimal_dose_mixed(
+    weight_kg: float,
+    animal_id: str | None = None,
+    return_range: bool = False,
+) -> float | tuple[float, float, float]:
+    """
+    Predict optimal daily T4 dose using the mixed-effects model.
+
+    Uses all treatment observations with random intercepts per animal,
+    predicting for controlled cases at the population level by default.
+
+    Args:
+        weight_kg: Kitten's current weight in kg.
+        animal_id: Optional animal ID for animal-specific prediction.
+        return_range: If True, return (low, optimal, high) dose range.
+
+    Returns:
+        Optimal daily dose in mcg, or (low, optimal, high) tuple.
+    """
+    if weight_kg <= 0:
+        raise ValueError("Weight must be positive")
+
+    model = get_fitted_mixed_model()
+
+    if animal_id is not None:
+        pred = float(model.predict_animal(weight_kg, animal_id))
+        if return_range:
+            # For animal-specific, use population CI as approximate range
+            _, lower, upper = model.predict_with_ci(weight_kg)
+            return (float(lower[0]), pred, float(upper[0]))
+        return pred
+
+    if return_range:
+        pred, lower, upper = model.predict_with_ci(weight_kg)
+        return (float(lower[0]), float(pred[0]), float(upper[0]))
+    else:
+        return float(model.predict(weight_kg))
+
+
+def print_mixed_formula() -> None:
+    """Print the mixed-effects model formula and summary."""
+    model = get_fitted_mixed_model()
+
+    print("=" * 60)
+    print("MIXED-EFFECTS MODEL FOR HYPOTHYROID KITTENS")
+    print("=" * 60)
+    print()
+    print(f"  {model.formula_string(controlled=True)}")
+    print()
+    print(f"  Allometric exponent: b = {model.b:.3f} ± {model.b_se:.3f}")
+    print(f"  Control effect (log scale): {model.control_effect:.3f} ± {model.control_effect_se:.3f}")
+    print()
+    print(f"  n = {model.n_observations} observations across {model.n_animals} animals")
+    print(f"  Marginal R² = {model.r_squared_marginal:.3f}")
+    print(f"  AIC = {model.aic:.1f}, BIC = {model.bic:.1f}")
+    print()
+    print("Random effects:")
+    print(f"  Between-animal SD: {model.random_intercept_sd:.3f}")
+    print(f"  Residual SD: {model.residual_sd:.3f}")
+    print(f"  ICC: {model.icc:.3f} ({model.icc * 100:.1f}% of variance is between-animal)")
+    print()
+    print("Reference dosing table (controlled cases, population-level):")
+    print("-" * 45)
+    print(model.dose_table().to_string(index=False))
+    print("=" * 60)
+
+
 if __name__ == "__main__":
     print_formula()
+    print()
+    print_mixed_formula()

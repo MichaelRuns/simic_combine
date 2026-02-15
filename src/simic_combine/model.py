@@ -1,6 +1,6 @@
 """Allometric model fitting for thyroid dosing prediction."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 import numpy as np
 from scipy.optimize import curve_fit
@@ -201,3 +201,213 @@ def compare_control_groups(df: pd.DataFrame) -> dict[int, AllometricModel]:
                 pass
 
     return models
+
+
+@dataclass
+class MixedAllometricModel:
+    """Fitted mixed-effects allometric model with random intercepts per animal.
+
+    The model is fit on the log scale:
+        log(dose) = log(a) + b * log(weight) + c * is_controlled + (1 | Animal_ID)
+
+    Population prediction for controlled cases:
+        dose = a_controlled * weight^b
+    where a_controlled = exp(log_a + control_effect)
+    """
+
+    # Population parameters (back-transformed to original scale)
+    a: float  # Scaling coefficient (for non-controlled baseline)
+    b: float  # Allometric exponent
+    a_se: float
+    b_se: float
+
+    # Control effect (on log scale)
+    control_effect: float
+    control_effect_se: float
+
+    # Derived: population coefficient for controlled cases
+    a_controlled: float
+
+    # Random effects
+    n_animals: int
+    random_intercept_sd: float
+    residual_sd: float
+    icc: float  # Intraclass correlation coefficient
+    animal_random_effects: dict[str, float] = field(default_factory=dict)
+
+    # Fit statistics
+    n_observations: int = 0
+    log_likelihood: float = 0.0
+    aic: float = 0.0
+    bic: float = 0.0
+    r_squared_marginal: float = 0.0
+
+    # Log-scale parameters (for CI computation)
+    log_a: float = 0.0
+    log_a_se: float = 0.0
+    _fe_cov: np.ndarray = field(default_factory=lambda: np.array([]))
+
+    def predict(self, weight: float | np.ndarray, controlled: bool = True) -> float | np.ndarray:
+        """Predict population-level daily dose for given weight(s).
+
+        Args:
+            weight: Weight(s) in kg.
+            controlled: If True, predict for controlled cases (default).
+        """
+        coef = self.a_controlled if controlled else self.a
+        return coef * np.power(weight, self.b)
+
+    def predict_per_kg(self, weight: float | np.ndarray, controlled: bool = True) -> float | np.ndarray:
+        """Predict population-level dose per kg for given weight(s)."""
+        coef = self.a_controlled if controlled else self.a
+        return coef * np.power(weight, self.b - 1)
+
+    def predict_animal(self, weight: float | np.ndarray, animal_id: str, controlled: bool = True) -> float | np.ndarray:
+        """Predict dose for a specific animal using its random intercept."""
+        re = self.animal_random_effects.get(animal_id, 0.0)
+        log_a_base = self.log_a + re
+        if controlled:
+            log_a_base += self.control_effect
+        return np.exp(log_a_base) * np.power(weight, self.b)
+
+    def predict_with_ci(
+        self, weight: float | np.ndarray, confidence: float = 0.95, controlled: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Predict dose with confidence interval (population-level, delta method on log scale)."""
+        weight = np.atleast_1d(weight)
+        log_w = np.log(weight)
+
+        # Mean prediction on log scale
+        log_pred = self.log_a + self.b * log_w
+        if controlled:
+            log_pred = log_pred + self.control_effect
+
+        # Variance via delta method using fixed-effects covariance
+        # Gradient: [d/d(log_a), d/d(b), d/d(control_effect)] = [1, log_w, is_controlled]
+        alpha = 1 - confidence
+        z_val = stats.norm.ppf(1 - alpha / 2)
+
+        pred = np.exp(log_pred)
+        lower = np.zeros_like(weight, dtype=float)
+        upper = np.zeros_like(weight, dtype=float)
+
+        if self._fe_cov.size > 0:
+            for i, lw in enumerate(log_w):
+                if controlled:
+                    grad = np.array([1.0, lw, 1.0])
+                else:
+                    grad = np.array([1.0, lw, 0.0])
+                var_log = grad @ self._fe_cov @ grad
+                se_log = np.sqrt(var_log)
+                lower[i] = np.exp(log_pred[i] - z_val * se_log)
+                upper[i] = np.exp(log_pred[i] + z_val * se_log)
+        else:
+            # Fallback: use parameter SEs
+            se_log = self.log_a_se
+            lower = np.exp(log_pred - z_val * se_log)
+            upper = np.exp(log_pred + z_val * se_log)
+
+        return pred, lower, upper
+
+    def formula_string(self, controlled: bool = True) -> str:
+        """Return human-readable formula string."""
+        coef = self.a_controlled if controlled else self.a
+        label = " (controlled)" if controlled else " (baseline)"
+        return f"Dose (mcg/day) = {coef:.1f} × Weight(kg)^{self.b:.2f}{label}"
+
+    def dose_table(self, weights: list[float] | None = None, controlled: bool = True) -> pd.DataFrame:
+        """Generate a dose reference table for common weights."""
+        if weights is None:
+            weights = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+        doses = self.predict(np.array(weights), controlled=controlled)
+        dose_per_kg = self.predict_per_kg(np.array(weights), controlled=controlled)
+
+        return pd.DataFrame({
+            "Weight (kg)": weights,
+            "Daily Dose (mcg)": np.round(doses, 0).astype(int),
+            "Dose per kg (mcg/kg)": np.round(dose_per_kg, 0).astype(int),
+        })
+
+
+def fit_mixed_model(df: pd.DataFrame) -> MixedAllometricModel:
+    """
+    Fit a linear mixed-effects model on log-transformed dose-weight data.
+
+    Model: log(dose) = log(a) + b * log(weight) + c * is_controlled + (1 | Animal_ID)
+
+    Args:
+        df: DataFrame from get_mixed_model_data() with columns:
+            log_dose, log_weight, is_controlled, Animal_ID
+
+    Returns:
+        Fitted MixedAllometricModel instance.
+    """
+    import statsmodels.formula.api as smf
+
+    # Fit mixed model
+    model = smf.mixedlm(
+        "log_dose ~ log_weight + is_controlled",
+        data=df,
+        groups=df["Animal_ID"],
+    )
+    result = model.fit(reml=True)
+
+    # Extract fixed effects
+    log_a = result.fe_params["Intercept"]
+    b = result.fe_params["log_weight"]
+    control_effect = result.fe_params["is_controlled"]
+
+    # Standard errors
+    log_a_se = result.bse_fe["Intercept"]
+    b_se = result.bse_fe["log_weight"]
+    control_effect_se = result.bse_fe["is_controlled"]
+
+    # Back-transform to original scale
+    a = np.exp(log_a)
+    # SE of a via delta method: se(exp(x)) = exp(x) * se(x)
+    a_se = a * log_a_se
+    a_controlled = np.exp(log_a + control_effect)
+
+    # Random effects
+    random_intercept_var = float(result.cov_re.iloc[0, 0])
+    random_intercept_sd = np.sqrt(random_intercept_var)
+    residual_sd = np.sqrt(result.scale)
+
+    # ICC = var(random intercept) / (var(random intercept) + var(residual))
+    icc = random_intercept_var / (random_intercept_var + result.scale)
+
+    # Per-animal random effects
+    animal_re = {str(k): float(v.iloc[0]) for k, v in result.random_effects.items()}
+
+    # Fixed-effects covariance matrix (for CI computation)
+    fe_cov = np.array(result.cov_params().iloc[:3, :3])
+
+    # Marginal R² (proportion of variance explained by fixed effects)
+    predicted_fixed = result.fe_params["Intercept"] + result.fe_params["log_weight"] * df["log_weight"] + result.fe_params["is_controlled"] * df["is_controlled"]
+    ss_fixed = np.var(predicted_fixed)
+    ss_total = np.var(df["log_dose"])
+    r_squared_marginal = float(ss_fixed / ss_total) if ss_total > 0 else 0.0
+
+    return MixedAllometricModel(
+        a=a,
+        b=b,
+        a_se=a_se,
+        b_se=b_se,
+        control_effect=control_effect,
+        control_effect_se=control_effect_se,
+        a_controlled=a_controlled,
+        n_animals=df["Animal_ID"].nunique(),
+        random_intercept_sd=random_intercept_sd,
+        residual_sd=residual_sd,
+        icc=icc,
+        animal_random_effects=animal_re,
+        n_observations=len(df),
+        log_likelihood=float(result.llf),
+        aic=float(result.aic),
+        bic=float(result.bic),
+        r_squared_marginal=r_squared_marginal,
+        log_a=log_a,
+        log_a_se=log_a_se,
+        _fe_cov=fe_cov,
+    )

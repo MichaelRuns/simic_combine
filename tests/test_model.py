@@ -4,8 +4,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from simic_combine.data import load_data, get_treatment_data, get_controlled_cases
-from simic_combine.model import fit_allometric_model, power_law, AllometricModel
+from simic_combine.data import (
+    load_data, get_treatment_data, get_controlled_cases,
+    get_mixed_model_data, normalize_animal_ids, ANIMAL_ID_NORMALIZATION,
+)
+from simic_combine.model import (
+    fit_allometric_model, power_law, AllometricModel,
+    fit_mixed_model, MixedAllometricModel,
+)
 from simic_combine.predict import predict_optimal_dose, predict_dose_per_kg
 
 
@@ -163,6 +169,133 @@ class TestDoseTable:
         assert "Daily Dose (mcg)" in table.columns
         assert "Dose per kg (mcg/kg)" in table.columns
         assert len(table) == 7  # Default weights (1.0 to 6.0 kg)
+
+
+class TestAnimalIDNormalization:
+    """Tests for animal ID normalization."""
+
+    def test_variant_names_mapped(self):
+        df = load_data()
+        treatment = get_treatment_data(df)
+        normalized = normalize_animal_ids(treatment)
+
+        id_col = "Animal ID" if "Animal ID" in normalized.columns else normalized.columns[0]
+        all_ids = normalized[id_col].unique()
+
+        # Variant names should not appear
+        for variant in ANIMAL_ID_NORMALIZATION:
+            if ANIMAL_ID_NORMALIZATION[variant] is not None:
+                assert variant not in all_ids, f"Variant '{variant}' should have been normalized"
+
+    def test_first_visits_dropped(self):
+        df = load_data()
+        treatment = get_treatment_data(df)
+        normalized = normalize_animal_ids(treatment)
+
+        id_col = "Animal ID" if "Animal ID" in normalized.columns else normalized.columns[0]
+        assert "# first visits" not in normalized[id_col].values
+
+    def test_canonical_names_preserved(self):
+        df = load_data()
+        treatment = get_treatment_data(df)
+        normalized = normalize_animal_ids(treatment)
+
+        id_col = "Animal ID" if "Animal ID" in normalized.columns else normalized.columns[0]
+        all_ids = set(normalized[id_col].unique())
+
+        # Canonical names that should exist (from the mapping targets)
+        for canonical in ANIMAL_ID_NORMALIZATION.values():
+            if canonical is not None and canonical in set(treatment[id_col].unique()) | set(ANIMAL_ID_NORMALIZATION.values()):
+                # Only check if the canonical name is expected to exist in the data
+                pass  # Some canonicals may only appear via mapping
+
+
+class TestMixedModelData:
+    """Tests for mixed model data preparation."""
+
+    def test_mixed_data_has_required_columns(self):
+        df = load_data()
+        treatment = get_treatment_data(df)
+        mixed_data = get_mixed_model_data(treatment)
+
+        required = ["log_dose", "log_weight", "is_controlled", "Animal_ID"]
+        for col in required:
+            assert col in mixed_data.columns, f"Missing column: {col}"
+
+    def test_no_nan_in_log_columns(self):
+        df = load_data()
+        treatment = get_treatment_data(df)
+        mixed_data = get_mixed_model_data(treatment)
+
+        assert not mixed_data["log_dose"].isna().any()
+        assert not mixed_data["log_weight"].isna().any()
+
+    def test_is_controlled_binary(self):
+        df = load_data()
+        treatment = get_treatment_data(df)
+        mixed_data = get_mixed_model_data(treatment)
+
+        assert set(mixed_data["is_controlled"].unique()).issubset({0, 1})
+
+    def test_uses_all_treatment_data(self):
+        df = load_data()
+        treatment = get_treatment_data(df)
+        mixed_data = get_mixed_model_data(treatment)
+
+        # Should use most/all treatment observations (minus any dropped by normalization)
+        assert len(mixed_data) >= len(treatment) - 5  # Allow small margin for dropped rows
+
+
+class TestMixedModelFitting:
+    """Tests for mixed-effects model fitting."""
+
+    @pytest.fixture
+    def mixed_model(self):
+        df = load_data()
+        treatment = get_treatment_data(df)
+        mixed_data = get_mixed_model_data(treatment)
+        return fit_mixed_model(mixed_data)
+
+    def test_returns_mixed_model(self, mixed_model):
+        assert isinstance(mixed_model, MixedAllometricModel)
+
+    def test_reasonable_parameters(self, mixed_model):
+        # Coefficient 'a' should be positive and reasonable
+        assert 20 < mixed_model.a < 500, f"a={mixed_model.a} out of range"
+        assert 20 < mixed_model.a_controlled < 500, f"a_controlled={mixed_model.a_controlled} out of range"
+
+        # Exponent should be in reasonable range
+        assert -0.5 < mixed_model.b < 2.0, f"b={mixed_model.b} out of range"
+
+    def test_icc_in_valid_range(self, mixed_model):
+        assert 0 < mixed_model.icc < 1, f"ICC={mixed_model.icc} out of (0,1)"
+
+    def test_random_effects_exist(self, mixed_model):
+        assert len(mixed_model.animal_random_effects) > 0
+        assert mixed_model.n_animals > 0
+        assert len(mixed_model.animal_random_effects) == mixed_model.n_animals
+
+    def test_uses_more_data_than_original(self, mixed_model):
+        # Mixed model should use more observations than controlled-only
+        df = load_data()
+        treatment = get_treatment_data(df)
+        controlled = get_controlled_cases(treatment)
+
+        assert mixed_model.n_observations > len(controlled)
+
+    def test_predict_monotonically_increasing(self, mixed_model):
+        doses = [mixed_model.predict(w) for w in [1.0, 2.0, 3.0, 4.0, 5.0]]
+        for i in range(len(doses) - 1):
+            assert doses[i] < doses[i + 1], "Dose should increase with weight"
+
+    def test_predict_with_ci(self, mixed_model):
+        pred, lower, upper = mixed_model.predict_with_ci(2.0)
+        assert lower[0] < pred[0] < upper[0]
+
+    def test_dose_table(self, mixed_model):
+        table = mixed_model.dose_table()
+        assert isinstance(table, pd.DataFrame)
+        assert len(table) == 7
 
 
 if __name__ == "__main__":

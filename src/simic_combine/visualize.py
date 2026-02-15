@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from simic_combine.data import load_data, get_treatment_data, get_controlled_cases, CONTROL_STATUS
-from simic_combine.model import fit_allometric_model, AllometricModel
+from simic_combine.data import load_data, get_treatment_data, get_controlled_cases, get_mixed_model_data, CONTROL_STATUS
+from simic_combine.model import fit_allometric_model, AllometricModel, fit_mixed_model, MixedAllometricModel
 
 
 # Color scheme for control status
@@ -322,9 +322,141 @@ def plot_control_distribution(
     return ax
 
 
+def plot_spaghetti(
+    df: pd.DataFrame,
+    model: MixedAllometricModel,
+    ax: Optional[plt.Axes] = None,
+) -> plt.Axes:
+    """
+    Spaghetti plot: each animal's dose-weight trajectory as a connected line.
+
+    Population curve overlaid for controlled cases.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 7))
+
+    id_col = "Animal_ID" if "Animal_ID" in df.columns else (
+        "Animal ID" if "Animal ID" in df.columns else df.columns[0]
+    )
+
+    cmap = plt.cm.tab20
+    animals = df[id_col].unique()
+    for i, animal in enumerate(animals):
+        animal_data = df[df[id_col] == animal].sort_values("Weight")
+        if len(animal_data) >= 2:
+            ax.plot(
+                animal_data["Weight"],
+                animal_data["daily_dose_mcg"],
+                color=cmap(i % 20),
+                alpha=0.4,
+                linewidth=1,
+            )
+        ax.scatter(
+            animal_data["Weight"],
+            animal_data["daily_dose_mcg"],
+            color=cmap(i % 20),
+            alpha=0.5,
+            s=20,
+            zorder=3,
+        )
+
+    # Population curve overlay
+    w_range = np.linspace(df["Weight"].min() * 0.9, df["Weight"].max() * 1.1, 100)
+    pop_pred = model.predict(w_range, controlled=True)
+    ax.plot(w_range, pop_pred, color="black", linewidth=2.5, label="Population (controlled)", zorder=5)
+
+    pop_pred_base = model.predict(w_range, controlled=False)
+    ax.plot(w_range, pop_pred_base, color="black", linewidth=2.5, linestyle="--", label="Population (baseline)", zorder=5)
+
+    ax.set_xlabel("Weight (kg)")
+    ax.set_ylabel("Total Daily Dose (mcg)")
+    ax.set_title("Individual Animal Trajectories (Dose vs Weight)")
+    ax.legend(loc="lower right")
+
+    return ax
+
+
+def plot_random_effects(
+    model: MixedAllometricModel,
+    ax: Optional[plt.Axes] = None,
+) -> plt.Axes:
+    """
+    Forest/caterpillar plot of per-animal random intercepts.
+
+    Shows how each animal deviates from the population average.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, max(6, len(model.animal_random_effects) * 0.3)))
+
+    # Sort by random effect value
+    sorted_re = sorted(model.animal_random_effects.items(), key=lambda x: x[1])
+    names = [x[0] for x in sorted_re]
+    values = [x[1] for x in sorted_re]
+
+    y_pos = np.arange(len(names))
+    colors = ["#e74c3c" if v < 0 else "#2ecc71" for v in values]
+
+    ax.barh(y_pos, values, color=colors, alpha=0.7, edgecolor="white", height=0.7)
+    ax.axvline(x=0, color="black", linewidth=1, linestyle="-")
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(names, fontsize=8)
+    ax.set_xlabel("Random Intercept (log scale)")
+    ax.set_title(f"Per-Animal Random Effects (ICC = {model.icc:.2f})")
+
+    return ax
+
+
+def plot_model_comparison(
+    old_model: AllometricModel,
+    mixed_model: MixedAllometricModel,
+    df: pd.DataFrame,
+    ax: Optional[plt.Axes] = None,
+) -> plt.Axes:
+    """
+    Side-by-side comparison of old (controlled-only) vs mixed model curves.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 7))
+
+    # Plot data points (controlled only, for fair comparison)
+    controlled = df[df["Control"] == 1]
+    ax.scatter(
+        controlled["Weight"],
+        controlled["daily_dose_mcg"],
+        c="#2ecc71",
+        alpha=0.5,
+        edgecolors="white",
+        linewidth=0.5,
+        s=60,
+        label="Controlled obs.",
+    )
+
+    # Curves
+    w_range = np.linspace(df["Weight"].min() * 0.9, df["Weight"].max() * 1.1, 100)
+
+    old_pred = old_model.predict(w_range)
+    mixed_pred = mixed_model.predict(w_range, controlled=True)
+
+    ax.plot(w_range, old_pred, color="#3498db", linewidth=2, label=f"Original (n={old_model.n_observations})")
+    ax.plot(w_range, mixed_pred, color="#e74c3c", linewidth=2, label=f"Mixed model (n={mixed_model.n_observations})")
+
+    # CI for mixed model
+    _, lower, upper = mixed_model.predict_with_ci(w_range)
+    ax.fill_between(w_range, lower, upper, alpha=0.15, color="#e74c3c")
+
+    ax.set_xlabel("Weight (kg)")
+    ax.set_ylabel("Total Daily Dose (mcg)")
+    ax.set_title("Model Comparison: Original vs Mixed-Effects")
+    ax.legend(loc="lower right")
+
+    return ax
+
+
 def generate_all_figures(
     output_dir: Optional[Path] = None,
     show: bool = True,
+    include_mixed: bool = True,
 ) -> None:
     """
     Generate all clinical visualization figures.
@@ -332,6 +464,7 @@ def generate_all_figures(
     Args:
         output_dir: Directory to save figures. If None, only displays.
         show: Whether to display figures interactively.
+        include_mixed: Whether to include mixed-model visualizations.
     """
     setup_style()
 
@@ -406,6 +539,37 @@ def generate_all_figures(
     if output_dir:
         fig_summary.savefig(output_dir / "summary_figure.png")
         fig_summary.savefig(output_dir / "summary_figure.pdf")
+
+    # Mixed-effects model figures
+    if include_mixed:
+        mixed_data = get_mixed_model_data(treatment)
+        mixed_model = fit_mixed_model(mixed_data)
+
+        print(f"\nMixed model: {mixed_model.formula_string()}")
+        print(f"n = {mixed_model.n_observations} observations, {mixed_model.n_animals} animals")
+        print(f"ICC = {mixed_model.icc:.3f}")
+
+        # Figure 6: Spaghetti plot
+        fig6, ax6 = plt.subplots(figsize=(10, 7))
+        plot_spaghetti(mixed_data, mixed_model, ax=ax6)
+        if output_dir:
+            fig6.savefig(output_dir / "fig6_spaghetti_plot.png")
+            fig6.savefig(output_dir / "fig6_spaghetti_plot.pdf")
+
+        # Figure 7: Random effects
+        fig7, ax7 = plt.subplots(figsize=(8, max(6, mixed_model.n_animals * 0.3)))
+        plot_random_effects(mixed_model, ax=ax7)
+        plt.tight_layout()
+        if output_dir:
+            fig7.savefig(output_dir / "fig7_random_effects.png")
+            fig7.savefig(output_dir / "fig7_random_effects.pdf")
+
+        # Figure 8: Model comparison
+        fig8, ax8 = plt.subplots(figsize=(10, 7))
+        plot_model_comparison(model, mixed_model, treatment, ax=ax8)
+        if output_dir:
+            fig8.savefig(output_dir / "fig8_model_comparison.png")
+            fig8.savefig(output_dir / "fig8_model_comparison.pdf")
 
     if show:
         plt.show()
