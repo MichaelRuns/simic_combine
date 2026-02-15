@@ -602,8 +602,10 @@ def create_interactive_plot(
     treatment = get_treatment_data(df)
     controlled = get_controlled_cases(treatment)
 
-    # Fit model
-    model = fit_allometric_model(controlled["Weight"], controlled["daily_dose_mcg"])
+    # Fit models
+    original_model = fit_allometric_model(controlled["Weight"], controlled["daily_dose_mcg"])
+    mixed_data = get_mixed_model_data(treatment)
+    mixed_model = fit_mixed_model(mixed_data)
 
     # Get animal ID column
     id_col = df.columns[0] if "Animal ID" not in df.columns else "Animal ID"
@@ -659,25 +661,37 @@ def create_interactive_plot(
             customdata=hover_text,
         ))
 
-    # Add fitted curve (from controlled cases only)
+    # Add fitted curves
     w_range = np.linspace(treatment["Weight"].min() * 0.9, treatment["Weight"].max() * 1.1, 100)
-    dose_per_kg_pred = model.predict_per_kg(w_range)
 
+    # Primary curve: mixed-effects model (controlled prediction)
+    mixed_dose_per_kg = mixed_model.predict_per_kg(w_range, controlled=True)
     fig.add_trace(go.Scatter(
         x=w_range,
-        y=dose_per_kg_pred,
+        y=mixed_dose_per_kg,
         mode="lines",
-        name=f"Fitted: {model.a:.0f} × W^{model.b - 1:.2f}",
+        name=f"Mixed Model: {mixed_model.a_controlled:.0f} × W^{mixed_model.b - 1:.2f}",
         line=dict(color="black", width=2),
-        hovertemplate="Weight: %{x:.2f} kg<br>Predicted: %{y:.0f} mcg/kg<extra></extra>",
+        hovertemplate="Weight: %{x:.2f} kg<br>Mixed Model: %{y:.0f} mcg/kg<extra></extra>",
+    ))
+
+    # Secondary curve: original model (dashed, for comparison)
+    original_dose_per_kg = original_model.predict_per_kg(w_range)
+    fig.add_trace(go.Scatter(
+        x=w_range,
+        y=original_dose_per_kg,
+        mode="lines",
+        name=f"Original: {original_model.a:.0f} × W^{original_model.b - 1:.2f}",
+        line=dict(color="gray", width=2, dash="dash"),
+        hovertemplate="Weight: %{x:.2f} kg<br>Original Model: %{y:.0f} mcg/kg<extra></extra>",
     ))
 
     # Update layout
     fig.update_layout(
         title=dict(
             text=f"<b>Hypothyroid Kitten Dosing: Dose per kg vs Weight</b><br>"
-                 f"<sub>Formula: Dose (mcg/kg) = {model.a:.0f} × Weight^{model.b - 1:.2f} | "
-                 f"R² = {model.r_squared:.3f} | n = {model.n_observations} controlled cases</sub>",
+                 f"<sub>Mixed Model: Dose (mcg/kg) = {mixed_model.a_controlled:.0f} × Weight^{mixed_model.b - 1:.2f} | "
+                 f"R² = {mixed_model.r_squared_marginal:.3f} | n = {mixed_model.n_observations} obs across {mixed_model.n_animals} animals</sub>",
             x=0.5,
             xanchor="center",
         ),

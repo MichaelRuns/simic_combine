@@ -44,6 +44,14 @@ Four modules in `src/simic_combine/`, each with a single responsibility:
 - Data file: `data/Hypothyroid kitten study - _Clinical Cases UTD (11_30_25).csv`
 - Interactive visualization deployed via GitHub Pages (`docs/index.html`)
 
+## Validation
+
+After modifying models or visualizations:
+- Run tests: `python -m pytest tests/`
+- Regenerate figures: `python -m simic_combine.visualize`
+- Regenerate GitHub Pages interactive plot: `python -c "from simic_combine.visualize import create_interactive_plot; from pathlib import Path; create_interactive_plot(output_path=Path('docs/index.html'))"`
+- Verify docs/index.html reflects current model parameters
+
 ## Dependencies
 
 Runtime: pandas, numpy, scipy, matplotlib, seaborn, plotly, statsmodels
